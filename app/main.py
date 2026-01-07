@@ -1,9 +1,9 @@
 """
 OneLink - Universal App Store Link Generator
-Aplicación FastAPI principal.
+FastAPI Main Application - MVP VERSION
 
-Esta aplicación permite crear links universales que redirigen automáticamente
-a la App Store correcta (iOS o Android) según el dispositivo del usuario.
+Simple, rápido, sin autenticación ni analytics.
+Solo redirección inteligente a app stores.
 """
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,83 +12,60 @@ import os
 from dotenv import load_dotenv
 
 from .database import engine, Base
-from .routers import auth_router, projects, redirect, analytics
+from .routers import projects, redirect
 
 # Cargar variables de entorno
 load_dotenv()
 
-# Crear tablas en la base de datos
+# Crear todas las tablas en la base de datos
 Base.metadata.create_all(bind=engine)
 
-# Crear aplicación FastAPI
+# Inicializar FastAPI
 app = FastAPI(
     title="OneLink API",
-    description="Universal App Store Link Generator - Backend API",
-    version="1.0.0",
+    description="Universal App Store Link Generator - Redirige usuarios a la store correcta automáticamente",
+    version="1.0.0 MVP",
     docs_url="/docs",
     redoc_url="/redoc"
 )
 
-# Configurar CORS
+# Configurar CORS (permitir requests desde cualquier origen)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # En producción, especificar dominios exactos
+    allow_origins=["*"],  # En producción, especifica dominios permitidos
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Incluir routers
-# IMPORTANTE: redirect.router va PRIMERO y SIN PREFIX
-# porque necesita capturar /{short_code} directamente
-app.include_router(redirect.router)
 
-# Los demás routers con sus prefijos
-app.include_router(auth_router.router)
-app.include_router(projects.router)
-app.include_router(analytics.router)
+# ============= ROUTES =============
 
-
-@app.get("/")
+# Root endpoint
+@app.get("/", tags=["root"])
 def root():
     """
-    Endpoint raíz - información de la API.
+    Endpoint raíz - Info básica de la API
     """
     return {
         "name": "OneLink API",
-        "version": "1.0.0",
+        "version": "1.0.0 MVP",
         "description": "Universal App Store Link Generator",
         "docs": "/docs",
-        "redoc": "/redoc",
         "endpoints": {
-            "auth": {
-                "register": "POST /api/auth/register",
-                "login": "POST /api/auth/login",
-                "me": "GET /api/auth/me"
-            },
-            "projects": {
-                "list": "GET /api/projects/",
-                "create": "POST /api/projects/",
-                "get": "GET /api/projects/{id}",
-                "update": "PUT /api/projects/{id}",
-                "delete": "DELETE /api/projects/{id}"
-            },
-            "analytics": {
-                "summary": "GET /api/analytics/{project_id}/summary",
-                "clicks": "GET /api/analytics/{project_id}/clicks",
-                "overview": "GET /api/analytics/overview"
-            },
-            "redirect": {
-                "short_link": "GET /{short_code}"
-            }
+            "create_project": "POST /api/projects/",
+            "list_projects": "GET /api/projects/",
+            "redirect": "GET /{short_code}",
+            "redirect_info": "GET /info/{short_code}"
         }
     }
 
 
-@app.get("/health")
+# Health check
+@app.get("/health", tags=["health"])
 def health_check():
     """
-    Health check endpoint para monitoreo.
+    Health check endpoint para monitoring
     """
     return {
         "status": "healthy",
@@ -97,27 +74,64 @@ def health_check():
     }
 
 
+
+# ============= INCLUDE ROUTERS =============
+
+# Router de proyectos (crear, listar)
+app.include_router(projects.router)
+
+# Router de redirección (¡EL MÁS IMPORTANTE!)
+# IMPORTANTE: Este debe ir SIN prefijo para que /{short_code} funcione
+app.include_router(redirect.router)
+
+
+# ============= ERROR HANDLERS =============
+
 @app.exception_handler(404)
-def not_found_handler(request, exc):
+async def not_found_handler(request, exc):
     """
-    Handler personalizado para 404.
+    Handler personalizado para 404
     """
     return JSONResponse(
         status_code=404,
         content={
-            "detail": "Not found",
-            "message": "The requested resource was not found"
+            "error": "Not Found",
+            "message": "El recurso solicitado no existe",
+            "path": str(request.url)
         }
     )
 
 
-if __name__ == "__main__":
-    import uvicorn
-    
-    # Para desarrollo local
-    uvicorn.run(
-        "app.main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True
+@app.exception_handler(500)
+async def internal_error_handler(request, exc):
+    """
+    Handler personalizado para errores 500
+    """
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "Internal Server Error",
+            "message": "Ocurrió un error interno. Por favor intenta de nuevo."
+        }
     )
+
+
+# ============= STARTUP EVENT =============
+
+@app.on_event("startup")
+async def startup_event():
+    """
+    Evento que se ejecuta al iniciar la aplicación
+    """
+    print("🚀 OneLink API iniciada")
+    print(f"📝 Documentación: http://localhost:8000/docs")
+    print(f"🔗 Base URL: {os.getenv('BASE_URL', 'http://localhost:8000')}")
+    print("✅ Sistema listo para generar links universales")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """
+    Evento que se ejecuta al cerrar la aplicación
+    """
+    print("👋 OneLink API detenida")
