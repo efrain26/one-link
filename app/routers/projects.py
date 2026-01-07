@@ -1,10 +1,11 @@
 """
-Router para gestión de proyectos (apps).
-Operaciones CRUD completas.
+Router de proyectos.
+CRUD completo: Create, Read, Update, Delete
+Endpoints: /api/projects/
 """
+from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from typing import List
 import os
 
 from ..database import get_db
@@ -13,12 +14,9 @@ from ..schemas import ProjectCreate, ProjectResponse, ProjectUpdate
 from ..auth import get_current_active_user
 from ..utils.short_url import generate_short_code, generate_short_url
 
-router = APIRouter(
-    prefix="/api/projects",
-    tags=["projects"]
-)
+router = APIRouter(prefix="/api/projects", tags=["Projects"])
 
-# Obtener BASE_URL desde .env
+# Base URL desde environment variable
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
 
 
@@ -29,33 +27,30 @@ def create_project(
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Crear un nuevo proyecto (app con links).
+    Crea un nuevo proyecto (app con links a stores).
+    
+    - **app_name**: Nombre de la aplicación
+    - **ios_url**: URL de Apple App Store
+    - **android_url**: URL de Google Play Store
+    - **fallback_url**: URL de respaldo (opcional)
+    
+    Returns:
+        Proyecto creado con short_code y short_url generados
     
     Ejemplo:
         POST /api/projects/
-        Headers: Authorization: Bearer {token}
-        Body:
+        Authorization: Bearer {token}
         {
-            "app_name": "Mi App Genial",
+            "app_name": "Mi Super App",
             "ios_url": "https://apps.apple.com/app/id123456789",
             "android_url": "https://play.google.com/store/apps/details?id=com.example.app",
             "fallback_url": "https://example.com"
-        }
-        
-        Respuesta:
-        {
-            "id": 1,
-            "app_name": "Mi App Genial",
-            "short_code": "aBc123",
-            "short_url": "http://localhost:8000/aBc123",
-            "total_clicks": 0,
-            ...
         }
     """
     # Generar código corto único
     short_code = generate_short_code()
     
-    # Verificar que sea único (muy raro que no lo sea, pero por seguridad)
+    # Verificar que sea único (por si acaso hay colisión)
     while db.query(Project).filter(Project.short_code == short_code).first():
         short_code = generate_short_code()
     
@@ -76,10 +71,10 @@ def create_project(
     # Generar URL completa
     short_url = generate_short_url(BASE_URL, short_code)
     
-    # Contar clicks (0 para proyecto nuevo)
+    # Contar clicks (será 0 para nuevo proyecto)
     total_clicks = 0
     
-    # Retornar con campos adicionales
+    # Retornar con información adicional
     return {
         **db_project.__dict__,
         "short_url": short_url,
@@ -89,31 +84,37 @@ def create_project(
 
 @router.get("/", response_model=List[ProjectResponse])
 def list_projects(
-    skip: int = 0,
-    limit: int = 100,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    skip: int = 0,
+    limit: int = 100
 ):
     """
-    Listar todos los proyectos del usuario actual.
+    Lista todos los proyectos del usuario actual.
     
-    Soporta paginación con skip y limit.
+    - **skip**: Número de registros a saltar (paginación)
+    - **limit**: Máximo de registros a retornar
+    
+    Ejemplo:
+        GET /api/projects/?skip=0&limit=10
+        Authorization: Bearer {token}
     """
     projects = db.query(Project).filter(
         Project.user_id == current_user.id
     ).offset(skip).limit(limit).all()
     
-    # Agregar short_url y total_clicks a cada proyecto
+    # Enriquecer con información adicional
     result = []
     for project in projects:
-        clicks_count = db.query(Click).filter(
+        # Contar clicks
+        total_clicks = db.query(Click).filter(
             Click.project_id == project.id
         ).count()
         
         result.append({
             **project.__dict__,
             "short_url": generate_short_url(BASE_URL, project.short_code),
-            "total_clicks": clicks_count
+            "total_clicks": total_clicks
         })
     
     return result
@@ -126,7 +127,11 @@ def get_project(
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Obtener un proyecto específico por ID.
+    Obtiene un proyecto específico por ID.
+    
+    Ejemplo:
+        GET /api/projects/1
+        Authorization: Bearer {token}
     """
     project = db.query(Project).filter(
         Project.id == project_id,
@@ -139,12 +144,15 @@ def get_project(
             detail="Project not found"
         )
     
-    clicks_count = db.query(Click).filter(Click.project_id == project.id).count()
+    # Contar clicks
+    total_clicks = db.query(Click).filter(
+        Click.project_id == project.id
+    ).count()
     
     return {
         **project.__dict__,
         "short_url": generate_short_url(BASE_URL, project.short_code),
-        "total_clicks": clicks_count
+        "total_clicks": total_clicks
     }
 
 
@@ -156,34 +164,45 @@ def update_project(
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Actualizar un proyecto existente.
-    Solo se actualizan los campos enviados.
+    Actualiza un proyecto existente.
+    
+    Todos los campos son opcionales. Solo se actualizan los campos enviados.
+    
+    Ejemplo:
+        PUT /api/projects/1
+        Authorization: Bearer {token}
+        {
+            "app_name": "Nuevo Nombre"
+        }
     """
-    db_project = db.query(Project).filter(
+    project = db.query(Project).filter(
         Project.id == project_id,
         Project.user_id == current_user.id
     ).first()
     
-    if not db_project:
+    if not project:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Project not found"
         )
     
-    # Actualizar solo campos que no son None
-    update_data = project_update.model_dump(exclude_unset=True)
+    # Actualizar solo los campos enviados
+    update_data = project_update.dict(exclude_unset=True)
     for field, value in update_data.items():
-        setattr(db_project, field, value)
+        setattr(project, field, value)
     
     db.commit()
-    db.refresh(db_project)
+    db.refresh(project)
     
-    clicks_count = db.query(Click).filter(Click.project_id == db_project.id).count()
+    # Contar clicks
+    total_clicks = db.query(Click).filter(
+        Click.project_id == project.id
+    ).count()
     
     return {
-        **db_project.__dict__,
-        "short_url": generate_short_url(BASE_URL, db_project.short_code),
-        "total_clicks": clicks_count
+        **project.__dict__,
+        "short_url": generate_short_url(BASE_URL, project.short_code),
+        "total_clicks": total_clicks
     }
 
 
@@ -194,21 +213,26 @@ def delete_project(
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Eliminar un proyecto.
+    Elimina un proyecto.
+    
     También elimina todos los clicks asociados (cascade).
+    
+    Ejemplo:
+        DELETE /api/projects/1
+        Authorization: Bearer {token}
     """
-    db_project = db.query(Project).filter(
+    project = db.query(Project).filter(
         Project.id == project_id,
         Project.user_id == current_user.id
     ).first()
     
-    if not db_project:
+    if not project:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Project not found"
         )
     
-    db.delete(db_project)
+    db.delete(project)
     db.commit()
     
     return None

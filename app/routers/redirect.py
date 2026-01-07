@@ -1,11 +1,11 @@
 """
-Router de redirección - El corazón del sistema.
-Este endpoint maneja las redirecciones a las stores.
+Router de redirección - EL MÁS IMPORTANTE.
+Este es el endpoint que hace la magia: /{short_code}
+Detecta el dispositivo y redirige a la store correcta.
 """
-from fastapi import APIRouter, Request, HTTPException, status
+from fastapi import APIRouter, Request, HTTPException, status, Depends
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
-from fastapi import Depends
 from datetime import datetime
 
 from ..database import get_db
@@ -13,7 +13,7 @@ from ..models import Project, Click
 from ..utils.device_detect import detect_platform, get_device_info
 from ..utils.short_url import hash_ip
 
-router = APIRouter(tags=["redirect"])
+router = APIRouter(tags=["Redirect"])
 
 
 @router.get("/{short_code}")
@@ -25,19 +25,28 @@ async def redirect_to_store(
     """
     Endpoint principal de redirección.
     
-    Este es el endpoint que se comparte con los usuarios.
+    Este es el que se usa en los SMS/links compartidos.
     Ejemplo: https://tudominio.com/aBc123
     
     Flujo:
-    1. Buscar proyecto por short_code
-    2. Detectar plataforma del usuario (iOS/Android/Other)
-    3. Registrar click en analytics
-    4. Redirigir a la store correcta
+    1. Busca el proyecto por short_code
+    2. Detecta la plataforma del usuario (iOS/Android/Other)
+    3. Registra el click en analytics
+    4. Redirige a la store correspondiente
     
-    Similar a un DeepLink handler en Android.
+    Args:
+        short_code: Código corto del proyecto (ej: 'aBc123')
+        request: FastAPI Request object (para obtener headers)
+        db: Database session
+    
+    Returns:
+        RedirectResponse a la store correspondiente (307 Temporary Redirect)
+    
+    Raises:
+        404: Si el short_code no existe
     """
     
-    # 1. Buscar el proyecto por short_code
+    # 1. Buscar el proyecto
     project = db.query(Project).filter(
         Project.short_code == short_code
     ).first()
@@ -45,7 +54,7 @@ async def redirect_to_store(
     if not project:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Link not found. Please check the URL."
+            detail=f"Link not found: {short_code}"
         )
     
     # 2. Detectar plataforma del usuario
@@ -53,19 +62,23 @@ async def redirect_to_store(
     platform = detect_platform(user_agent)
     device_info = get_device_info(user_agent)
     
-    # 3. Obtener IP del cliente (para analytics)
+    # 3. Obtener IP (para analytics y geolocalización)
+    # En producción con proxy/load balancer, usar X-Forwarded-For
     client_ip = request.client.host if request.client else "unknown"
-    ip_hashed = hash_ip(client_ip)
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        client_ip = forwarded_for.split(",")[0].strip()
     
-    # 4. Registrar el click en analytics
+    # 4. Registrar click en analytics
     click = Click(
         project_id=project.id,
         platform=platform,
         device_type=device_info.get('device', 'Unknown'),
         browser=device_info.get('browser', 'Unknown'),
         os_version=device_info.get('os_version', 'Unknown'),
-        country="Unknown",  # Puedes agregar GeoIP aquí más tarde
-        ip_hash=ip_hashed,
+        country="Unknown",  # TODO: Agregar GeoIP lookup
+        city=None,
+        ip_hash=hash_ip(client_ip),
         timestamp=datetime.utcnow()
     )
     
@@ -81,41 +94,8 @@ async def redirect_to_store(
         # Desktop u otros dispositivos
         redirect_url = project.fallback_url or project.android_url
     
-    # 6. Redirigir al usuario
-    # 307: Temporary Redirect (mantiene el método HTTP)
+    # 6. Redirigir (307 = Temporary Redirect, mantiene método HTTP)
     return RedirectResponse(
         url=redirect_url,
         status_code=status.HTTP_307_TEMPORARY_REDIRECT
     )
-
-
-@router.get("/{short_code}/preview")
-async def preview_link(
-    short_code: str,
-    db: Session = Depends(get_db)
-):
-    """
-    Preview de un link sin redirigir.
-    Útil para ver a dónde apunta un link antes de hacer click.
-    
-    Ejemplo: GET /aBc123/preview
-    """
-    project = db.query(Project).filter(
-        Project.short_code == short_code
-    ).first()
-    
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Link not found"
-        )
-    
-    return {
-        "short_code": short_code,
-        "app_name": project.app_name,
-        "destinations": {
-            "ios": project.ios_url,
-            "android": project.android_url,
-            "fallback": project.fallback_url
-        }
-    }

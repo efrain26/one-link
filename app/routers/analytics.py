@@ -1,10 +1,11 @@
 """
-Router de analytics - Estadísticas y métricas.
+Router de analytics.
+Proporciona estadísticas y métricas de los proyectos.
 """
+from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from typing import List
 from datetime import datetime, timedelta
 
 from ..database import get_db
@@ -12,27 +13,32 @@ from ..models import User, Project, Click
 from ..schemas import AnalyticsSummary, ClickResponse
 from ..auth import get_current_active_user
 
-router = APIRouter(
-    prefix="/api/analytics",
-    tags=["analytics"]
-)
+router = APIRouter(prefix="/api/analytics", tags=["Analytics"])
 
 
-@router.get("/projects/{project_id}/summary", response_model=AnalyticsSummary)
+@router.get("/{project_id}/summary", response_model=AnalyticsSummary)
 def get_project_analytics(
     project_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    days: int = 30
 ):
     """
-    Obtener resumen de analytics para un proyecto.
+    Obtiene resumen de analytics para un proyecto.
     
-    Retorna:
-    - Total de clicks
-    - Clicks por plataforma (iOS, Android, Other)
-    - Tasa de conversión
-    - Top países
-    - Clicks por día
+    - **project_id**: ID del proyecto
+    - **days**: Número de días a analizar (default: 30)
+    
+    Returns:
+        - Total de clicks
+        - Clicks por plataforma (iOS, Android, Other)
+        - Tasa de conversión
+        - Top países
+        - Clicks por día
+    
+    Ejemplo:
+        GET /api/analytics/1/summary?days=30
+        Authorization: Bearer {token}
     """
     # Verificar que el proyecto pertenece al usuario
     project = db.query(Project).filter(
@@ -46,46 +52,49 @@ def get_project_analytics(
             detail="Project not found"
         )
     
-    # Obtener todos los clicks del proyecto
-    clicks = db.query(Click).filter(Click.project_id == project_id).all()
+    # Calcular fecha límite
+    date_limit = datetime.utcnow() - timedelta(days=days)
     
-    total_clicks = len(clicks)
+    # Obtener todos los clicks del proyecto en el período
+    clicks = db.query(Click).filter(
+        Click.project_id == project_id,
+        Click.timestamp >= date_limit
+    ).all()
     
     # Contar por plataforma
+    total_clicks = len(clicks)
     ios_clicks = sum(1 for c in clicks if c.platform == 'ios')
     android_clicks = sum(1 for c in clicks if c.platform == 'android')
     other_clicks = sum(1 for c in clicks if c.platform == 'other')
     
-    # Calcular tasa de conversión (móviles vs total)
+    # Calcular tasa de conversión (móviles / total)
     mobile_clicks = ios_clicks + android_clicks
     conversion_rate = f"{(mobile_clicks / total_clicks * 100):.1f}%" if total_clicks > 0 else "0%"
     
-    # Top países (simplificado - puedes mejorar con GeoIP)
-    country_counts = db.query(
-        Click.country,
-        func.count(Click.id).label('count')
-    ).filter(
-        Click.project_id == project_id
-    ).group_by(Click.country).order_by(func.count(Click.id).desc()).limit(5).all()
+    # Top países (agrupar por país)
+    country_counts = {}
+    for click in clicks:
+        country = click.country or "Unknown"
+        country_counts[country] = country_counts.get(country, 0) + 1
     
     top_countries = [
         {"country": country, "clicks": count}
-        for country, count in country_counts
+        for country, count in sorted(
+            country_counts.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )[:5]  # Top 5 países
     ]
     
-    # Clicks por día (últimos 7 días)
-    seven_days_ago = datetime.utcnow() - timedelta(days=7)
-    daily_clicks = db.query(
-        func.date(Click.timestamp).label('date'),
-        func.count(Click.id).label('clicks')
-    ).filter(
-        Click.project_id == project_id,
-        Click.timestamp >= seven_days_ago
-    ).group_by(func.date(Click.timestamp)).all()
+    # Clicks por día
+    clicks_by_day_dict = {}
+    for click in clicks:
+        day = click.timestamp.date().isoformat()
+        clicks_by_day_dict[day] = clicks_by_day_dict.get(day, 0) + 1
     
     clicks_by_day = [
-        {"date": str(date), "clicks": clicks}
-        for date, clicks in daily_clicks
+        {"date": day, "clicks": count}
+        for day, count in sorted(clicks_by_day_dict.items())
     ]
     
     return {
@@ -101,17 +110,23 @@ def get_project_analytics(
     }
 
 
-@router.get("/projects/{project_id}/clicks", response_model=List[ClickResponse])
+@router.get("/{project_id}/clicks", response_model=List[ClickResponse])
 def get_project_clicks(
     project_id: int,
-    skip: int = 0,
-    limit: int = 100,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    skip: int = 0,
+    limit: int = 100
 ):
     """
-    Obtener lista detallada de clicks individuales.
-    Útil para ver cada click con sus detalles.
+    Obtiene lista detallada de clicks de un proyecto.
+    
+    - **skip**: Registros a saltar (paginación)
+    - **limit**: Máximo de registros a retornar
+    
+    Ejemplo:
+        GET /api/analytics/1/clicks?skip=0&limit=50
+        Authorization: Bearer {token}
     """
     # Verificar que el proyecto pertenece al usuario
     project = db.query(Project).filter(
@@ -125,77 +140,85 @@ def get_project_clicks(
             detail="Project not found"
         )
     
-    # Obtener clicks con paginación
+    # Obtener clicks ordenados por timestamp descendente (más recientes primero)
     clicks = db.query(Click).filter(
         Click.project_id == project_id
-    ).order_by(Click.timestamp.desc()).offset(skip).limit(limit).all()
+    ).order_by(
+        Click.timestamp.desc()
+    ).offset(skip).limit(limit).all()
     
     return clicks
 
 
-@router.get("/dashboard")
-def get_dashboard_summary(
+@router.get("/overview", response_model=dict)
+def get_user_analytics_overview(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Resumen general de todos los proyectos del usuario.
-    Útil para mostrar un dashboard general.
+    Obtiene resumen general de analytics para todos los proyectos del usuario.
+    
+    Returns:
+        - Total de proyectos
+        - Total de clicks
+        - Clicks por plataforma
+        - Proyecto más popular
+    
+    Ejemplo:
+        GET /api/analytics/overview
+        Authorization: Bearer {token}
     """
-    # Total de proyectos
-    total_projects = db.query(Project).filter(
+    # Obtener todos los proyectos del usuario
+    projects = db.query(Project).filter(
         Project.user_id == current_user.id
-    ).count()
+    ).all()
     
-    # Total de clicks en todos los proyectos
-    project_ids = [p.id for p in db.query(Project.id).filter(
-        Project.user_id == current_user.id
-    ).all()]
+    total_projects = len(projects)
     
-    total_clicks = db.query(Click).filter(
+    # Obtener IDs de proyectos
+    project_ids = [p.id for p in projects]
+    
+    if not project_ids:
+        return {
+            "total_projects": 0,
+            "total_clicks": 0,
+            "ios_clicks": 0,
+            "android_clicks": 0,
+            "other_clicks": 0,
+            "most_popular_project": None
+        }
+    
+    # Contar todos los clicks
+    all_clicks = db.query(Click).filter(
         Click.project_id.in_(project_ids)
-    ).count() if project_ids else 0
+    ).all()
     
-    # Clicks por plataforma (global)
-    platform_stats = db.query(
-        Click.platform,
-        func.count(Click.id).label('count')
-    ).filter(
-        Click.project_id.in_(project_ids)
-    ).group_by(Click.platform).all() if project_ids else []
+    total_clicks = len(all_clicks)
+    ios_clicks = sum(1 for c in all_clicks if c.platform == 'ios')
+    android_clicks = sum(1 for c in all_clicks if c.platform == 'android')
+    other_clicks = sum(1 for c in all_clicks if c.platform == 'other')
     
-    platform_breakdown = {
-        platform: count for platform, count in platform_stats
-    }
+    # Encontrar proyecto más popular
+    project_click_counts = {}
+    for click in all_clicks:
+        project_click_counts[click.project_id] = project_click_counts.get(click.project_id, 0) + 1
     
-    # Proyecto más popular (por clicks)
-    if project_ids:
-        top_project_id = db.query(
-            Click.project_id,
-            func.count(Click.id).label('click_count')
-        ).filter(
-            Click.project_id.in_(project_ids)
-        ).group_by(Click.project_id).order_by(
-            func.count(Click.id).desc()
-        ).first()
-        
-        if top_project_id:
-            top_project = db.query(Project).filter(
-                Project.id == top_project_id[0]
-            ).first()
-            most_popular = {
-                "project_id": top_project.id,
-                "app_name": top_project.app_name,
-                "clicks": top_project_id[1]
+    most_popular_project = None
+    if project_click_counts:
+        most_popular_id = max(project_click_counts, key=project_click_counts.get)
+        most_popular = next((p for p in projects if p.id == most_popular_id), None)
+        if most_popular:
+            most_popular_project = {
+                "id": most_popular.id,
+                "app_name": most_popular.app_name,
+                "clicks": project_click_counts[most_popular_id]
             }
-        else:
-            most_popular = None
-    else:
-        most_popular = None
     
     return {
         "total_projects": total_projects,
         "total_clicks": total_clicks,
-        "platform_breakdown": platform_breakdown,
-        "most_popular_project": most_popular
+        "ios_clicks": ios_clicks,
+        "android_clicks": android_clicks,
+        "other_clicks": other_clicks,
+        "most_popular_project": most_popular_project
     }
